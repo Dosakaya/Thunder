@@ -18,6 +18,8 @@
  */
 
 #include "PluginServer.h"
+#include "PluginHost.h"
+
 #include <fstream>
 
 #ifndef __WINDOWS__
@@ -268,8 +270,9 @@ POP_WARNING()
     Core::CriticalSection ExitHandler::_adminLock;
     
     #ifndef __WINDOWS__
-    struct sigaction _originalSegmentationHandler;
-    struct sigaction _originalAbortHandler;
+    static struct sigaction _originalSegmentationHandler;
+    static struct sigaction _originalAbortHandler;
+    static Core::CriticalSection _adminLock;
     #endif
 
     static string GetDeviceId(PluginHost::Server* dispatcher)
@@ -304,6 +307,8 @@ POP_WARNING()
 
     void ExitDaemonHandler(int signo)
     {
+        string segname = "";
+
         if (_background) {
             syslog(LOG_NOTICE, "Signal received %d. in process [%d]", signo, getpid());
         } else {
@@ -332,10 +337,11 @@ POP_WARNING()
 
             ExitHandler::DumpMetadata();
 
+            segname = (signo == SIGSEGV) ? "a segmentation fault" : (signo == SIGABRT) ? "an abort" : "";
             if (_background) {
-                syslog(LOG_NOTICE, EXPAND_AND_QUOTE(APPLICATION_NAME) " shutting down due to a segmentation fault. All relevant data dumped");
+                syslog(LOG_NOTICE, EXPAND_AND_QUOTE(APPLICATION_NAME) " shutting down due to %s signal. All relevant data dumped", segname.c_str());
             } else {
-                fprintf(stderr, EXPAND_AND_QUOTE(APPLICATION_NAME) " shutting down due to a segmentation fault. All relevant data dumped\n");
+                fprintf(stderr, EXPAND_AND_QUOTE(APPLICATION_NAME) " shutting down due to %s signal. All relevant data dumped\n", segname.c_str());
                 fflush(stderr);
             }
 
@@ -344,6 +350,37 @@ POP_WARNING()
         else if (signo == SIGUSR1) {
             ExitHandler::DumpMetadata();
         }
+    }
+
+    void SetupCrashHandler(void)
+    {
+        _adminLock.Lock();
+        struct sigaction sa, current_sa;
+
+        sigaction(SIGSEGV, nullptr, &current_sa);
+        if (current_sa.sa_handler != ExitDaemonHandler)
+        {
+            _originalSegmentationHandler = current_sa;
+             memset(&sa, 0, sizeof(struct sigaction));
+             sigemptyset(&sa.sa_mask);
+             sa.sa_handler = ExitDaemonHandler;
+             sa.sa_flags = 0;
+             syslog(LOG_NOTICE, "Registering ExitDaemonHandler for SIGSEGV");
+             sigaction(SIGSEGV, &sa, nullptr);
+        }
+
+        sigaction(SIGABRT, nullptr, &current_sa);
+        if (current_sa.sa_handler != ExitDaemonHandler)
+        {
+            _originalAbortHandler = current_sa;
+             memset(&sa, 0, sizeof(struct sigaction));
+             sigemptyset(&sa.sa_mask);
+             sa.sa_handler = ExitDaemonHandler;
+             sa.sa_flags = 0;
+             syslog(LOG_NOTICE, "Registering ExitDaemonHandler for SIGABRT");
+             sigaction(SIGABRT, &sa, nullptr);
+        }
+        _adminLock.Unlock();
     }
 
 #endif
